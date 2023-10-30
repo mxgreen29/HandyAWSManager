@@ -1,0 +1,82 @@
+image:
+  name: hashicorp/terraform:1.6
+variables:
+  TF_ROOT: ${CI_PROJECT_DIR}/Terraform
+  AWS_DEFAULT_REGION: us-east-1
+  PLAN: plan.cache
+
+cache:
+  key: "${TF_ROOT}"
+  paths:
+    - ${TF_ROOT}/.terraform/
+    - ${TF_ROOT}/.terraform.lock.hcl
+
+before_script:
+  - cd ${TF_ROOT}
+  - export TF_VAR_mysql_pass=$mysql_pass
+
+.terraform:security: &tf_sec
+  stage: validate
+  before_script:
+    - cd ${TF_ROOT}
+  image: aquasec/tfsec-ci
+  services:
+    - docker:18.09-dind
+  script:
+    - tfsec .
+  allow_failure: true
+  only:
+    changes:
+      - Terraform/*
+      - Terraform/**/*
+      - .gitlab-ci.yml
+      - .ci/Terraform.gitlab-ci.yml
+
+.terraform:fmt: &terraform_fmt
+  stage: validate
+  script:
+    - terraform fmt
+  allow_failure: true
+
+.terraform:tf_plan: &tf_plan
+  stage: plan
+  services:
+    - docker:18.09-dind
+  script:
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID && echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> ../job.env
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_KEY && echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_KEY" >> ../job.env
+    - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION && echo "AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION" >> ../job.env
+    - echo "AWS_ACCOUNT=$AWS_ACCOUNT" >> ../job.env
+    - terraform init -reconfigure
+    - terraform validate
+    - terraform workspace list
+    - terraform workspace select -or-create $AWS_ACCOUNT
+    - terraform plan -var-file="vars/${AWS_ACCOUNT}.tfvars" -out=$PLAN
+  resource_group: TF_PLAN
+  artifacts:
+    public: false
+    paths:
+      - ${TF_ROOT}/${PLAN}
+    reports:
+      terraform: ${TF_ROOT}/${PLAN}
+      dotenv: job.env
+# Separate apply job for manual launching Terrafrom as it can be destructive
+# action.
+.terraform:tf_apply: &tf_apply
+  stage: deploy
+  services:
+    - docker:18.09-dind
+  script:
+    - terraform workspace list
+    - terraform workspace select $AWS_ACCOUNT
+    - terraform apply "$PLAN"
+  when: manual
+  resource_group: TF_PLAN
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - Terraform/*
+        - Terraform/**/*
+        - .gitlab-ci.yml
+        - .ci/Terraform.gitlab-ci.yml
+
